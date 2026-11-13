@@ -2,6 +2,8 @@
 
 #define BOARD_SIZE 20
 #define CACHE_SIZE 32
+#define HEADER_COLOR GColorOxfordBlue
+#define SELECTED_COLOR GColorDukeBlue
 
 typedef struct {
   int index;
@@ -13,7 +15,9 @@ typedef struct {
 typedef struct {
   time_t arrival;
   bool live;
+  uint8_t vehicle;
   char route[24];
+  char next[132];
 } ArrivalRow;
 
 typedef struct {
@@ -24,7 +28,7 @@ typedef struct {
 
 static Window *s_window;
 static MenuLayer *s_menu;
-static GFont s_font;
+static GFont s_font, s_small_font;
 static AppTimer *s_timeout, *s_auto_timer, *s_row_timer;
 static AppTimer *s_marquee_timer;
 static int s_marquee_row = -1;
@@ -206,11 +210,15 @@ static void inbox(DictionaryIterator *iterator, void *context) {
     preview->expires = number(iterator, MESSAGE_KEY_Expires);
     preview->rows[0].arrival = number(iterator, MESSAGE_KEY_Arrival);
     preview->rows[0].live = number(iterator, MESSAGE_KEY_Live);
+    preview->rows[0].vehicle = number(iterator, MESSAGE_KEY_Vehicle);
+    copy_text(iterator, MESSAGE_KEY_NextStop, preview->rows[0].next, sizeof(preview->rows[0].next));
     copy_text(iterator, MESSAGE_KEY_Route, preview->rows[0].route, sizeof(preview->rows[0].route));
     preview->rows[1].arrival = number(iterator, MESSAGE_KEY_SecondArrival);
     preview->rows[1].live = number(iterator, MESSAGE_KEY_SecondLive);
+    preview->rows[1].vehicle = number(iterator, MESSAGE_KEY_SecondVehicle);
+    copy_text(iterator, MESSAGE_KEY_SecondNextStop, preview->rows[1].next, sizeof(preview->rows[1].next));
     copy_text(iterator, MESSAGE_KEY_SecondRoute, preview->rows[1].route, sizeof(preview->rows[1].route));
-    if (!s_on_board) layer_mark_dirty(menu_layer_get_layer(s_menu));
+    if (!s_on_board) redraw();
     return;
   }
   if (status == 8) {
@@ -260,6 +268,8 @@ static void inbox(DictionaryIterator *iterator, void *context) {
     ArrivalRow *row = &s_next_board[index];
     row->arrival = number(iterator, MESSAGE_KEY_Arrival);
     row->live = number(iterator, MESSAGE_KEY_Live);
+    row->vehicle = number(iterator, MESSAGE_KEY_Vehicle);
+    copy_text(iterator, MESSAGE_KEY_NextStop, row->next, sizeof(row->next));
     copy_text(iterator, MESSAGE_KEY_Route, row->route, sizeof(row->route));
     if (++s_next_index < s_next_count) send(5, s_next_index);
     else commit_board();
@@ -280,25 +290,61 @@ static void outbox_failed(DictionaryIterator *iterator, AppMessageResult reason,
   }
 }
 
-static ArrivalRow *visible_arrival(int index) {
+typedef struct {
+  const ArrivalRow *first;
+  int times[2][3];
+  int counts[2];
+} RouteGroup;
+
+static int route_groups(RouteGroup groups[BOARD_SIZE]) {
+  int count = 0;
   time_t now = time(NULL);
   for (int i = 0; i < s_count; i++) {
-    ArrivalRow *row = &s_board[i];
+    const ArrivalRow *row = &s_board[i];
     if (row->arrival <= now || (row->live && s_expiry <= now)) continue;
-    if (index-- == 0) return row;
+
+    int group = 0;
+    while (group < count) {
+      const ArrivalRow *first = groups[group].first;
+      if (first->vehicle == row->vehicle && strcmp(first->route, row->route) == 0 &&
+          strcmp(first->next, row->next) == 0) break;
+      group++;
+    }
+    if (group == count) {
+      groups[count++] = (RouteGroup){ .first = row };
+    }
+
+    RouteGroup *entry = &groups[group];
+    int source = row->live ? 0 : 1;
+    int slot = entry->counts[source];
+    if (slot < 3) {
+      entry->times[source][slot] = (int)difftime(row->arrival, now);
+      entry->counts[source]++;
+    }
   }
-  return NULL;
+  return count;
 }
 
 static uint16_t row_count(MenuLayer *menu, uint16_t section, void *context) {
   if (!s_on_board) return s_stop_count + 1;
-  int count = 0;
-  while (visible_arrival(count)) count++;
+  RouteGroup groups[BOARD_SIZE];
+  int count = route_groups(groups);
   return count ? count : 1;
 }
 
 static int16_t row_height(MenuLayer *menu, MenuIndex *index, void *context) {
-  return s_on_board ? 43 : index->row < s_stop_count ? 128 : 57;
+  if (!s_on_board) {
+    if (index->row >= s_stop_count) return 57;
+    Preview *preview = &s_previews[index->row % CACHE_SIZE];
+    if (preview->index != index->row) return 128;
+    return 128 + 18 * (!!preview->rows[0].next[0] + !!preview->rows[1].next[0]);
+  }
+  RouteGroup groups[BOARD_SIZE];
+  int count = route_groups(groups);
+  if (index->row >= count) return 48;
+  RouteGroup *group = &groups[index->row];
+  return (group->counts[0] && group->counts[1] ? 68 : 48) +
+         (group->first->next[0] ? 18 : 0);
 }
 
 static void draw_text(GContext *ctx, const char *text, GRect bounds, bool selected) {
@@ -340,7 +386,7 @@ static void draw_direction(GContext *ctx, const char *text, GRect line,
   GRect moving = GRect(line.origin.x - s_marquee_offset, line.origin.y,
                        width + 4, line.size.h);
   draw_text(ctx, text, moving, true);
-  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_context_set_fill_color(ctx, SELECTED_COLOR);
   graphics_fill_rect(ctx, GRect(0, line.origin.y, line.origin.x, line.size.h), 0, GCornerNone);
   graphics_fill_rect(ctx, GRect(line.origin.x + line.size.w, line.origin.y,
                                 line.origin.x, line.size.h), 0, GCornerNone);
@@ -351,25 +397,108 @@ static void draw_direction(GContext *ctx, const char *text, GRect line,
   }
 }
 
+static void draw_vehicle(GContext *ctx, GPoint position, uint8_t vehicle) {
+  if (!vehicle) return;
+  int x = position.x, y = position.y;
+  GColor color = vehicle == 3 ? GColorWindsorTan :
+                 vehicle == 2 ? GColorDarkGreen : GColorOxfordBlue;
+  graphics_context_set_fill_color(ctx, color);
+  graphics_fill_rect(ctx, GRect(x, y, 24, 20), 4, GCornersAll);
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_context_set_stroke_color(ctx, GColorWhite);
+  if (vehicle == 3) {
+    graphics_draw_line(ctx, GPoint(x + 9, y + 5), GPoint(x + 14, y + 2));
+    graphics_draw_line(ctx, GPoint(x + 7, y + 17), GPoint(x + 9, y + 14));
+    graphics_draw_line(ctx, GPoint(x + 16, y + 17), GPoint(x + 14, y + 14));
+    graphics_fill_rect(ctx, GRect(x + 7, y + 6, 10, 9), 2, GCornersAll);
+  } else {
+    graphics_fill_rect(ctx, GRect(x + 5, y + 5, 14, 10), 2, GCornersAll);
+    graphics_fill_circle(ctx, GPoint(x + 8, y + 15), 2);
+    graphics_fill_circle(ctx, GPoint(x + 16, y + 15), 2);
+  }
+  graphics_context_set_fill_color(ctx, color);
+  if (vehicle == 2) {
+    graphics_context_set_stroke_color(ctx, color);
+    graphics_draw_line(ctx, GPoint(x + 13, y + 6), GPoint(x + 10, y + 10));
+    graphics_draw_line(ctx, GPoint(x + 10, y + 10), GPoint(x + 13, y + 10));
+    graphics_draw_line(ctx, GPoint(x + 13, y + 10), GPoint(x + 11, y + 14));
+  } else {
+    graphics_fill_rect(ctx, GRect(x + 8, y + 8, 8, 3), 0, GCornerNone);
+  }
+}
+
+static void draw_arrival(GContext *ctx, const ArrivalRow *row, GRect line,
+                         bool selected) {
+  int seconds = (int)difftime(row->arrival, time(NULL));
+  char eta[24], text[64];
+  if (seconds < 60) snprintf(eta, sizeof(eta), "< 1 мин");
+  else snprintf(eta, sizeof(eta), "%d мин", (seconds + 59) / 60);
+  snprintf(text, sizeof(text), "%s · %s", row->route, eta);
+  if (row->vehicle) {
+    draw_vehicle(ctx, line.origin, row->vehicle);
+    line.origin.x += 29;
+    line.size.w -= 29;
+  }
+  const char *source = row->live ? "прогноз" : "по расп.";
+  int width = graphics_text_layout_get_content_size(source, s_small_font,
+    GRect(0, 0, 200, 22), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft).w + 2;
+  GRect label = GRect(line.origin.x + line.size.w - width, line.origin.y, width, 22);
+  line.size.w -= width + 4;
+  line.origin.y += 2;
+  label.origin.y += 2;
+  graphics_context_set_text_color(ctx, selected ? GColorWhite : GColorBlack);
+  graphics_draw_text(ctx, text, s_small_font, line, GTextOverflowModeTrailingEllipsis,
+                     GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, source, s_small_font, label, GTextOverflowModeTrailingEllipsis,
+                     GTextAlignmentRight, NULL);
+}
+
+static void draw_route_group(GContext *ctx, const RouteGroup *group, int width, bool selected) {
+  const ArrivalRow *first = group->first;
+  draw_vehicle(ctx, GPoint(8, 3), first->vehicle);
+  int title_x = first->vehicle ? 37 : 8;
+  draw_text(ctx, first->route, GRect(title_x, 2, width - title_x - 8, 22), selected);
+
+  int y = 24;
+  graphics_context_set_text_color(ctx, selected ? GColorWhite : GColorBlack);
+  if (first->next[0]) {
+    graphics_draw_text(ctx, first->next, s_small_font, GRect(title_x, y, width - title_x - 8, 18),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    y += 18;
+  }
+  for (int source = 0; source < 2; source++) {
+    if (!group->counts[source]) continue;
+    char times[48] = "";
+    for (int i = 0; i < group->counts[source]; i++) {
+      int seconds = group->times[source][i];
+      char value[12];
+      if (seconds < 60) snprintf(value, sizeof(value), "<1");
+      else snprintf(value, sizeof(value), "%d", (seconds + 59) / 60);
+      size_t used = strlen(times);
+      snprintf(times + used, sizeof(times) - used, "%s%s", i ? ", " : "", value);
+    }
+    size_t used = strlen(times);
+    snprintf(times + used, sizeof(times) - used, " мин");
+    graphics_draw_text(ctx, source ? "по расп." : "прогноз", s_small_font,
+                       GRect(8, y, 62, 20), GTextOverflowModeTrailingEllipsis,
+                       GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, times, s_small_font, GRect(72, y, width - 80, 20),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    y += 20;
+  }
+}
+
 static void draw_row(GContext *ctx, const Layer *layer, MenuIndex *index, void *context) {
   GRect bounds = layer_get_bounds(layer);
   bool selected = menu_cell_layer_is_highlighted(layer);
   GRect line = GRect(8, 4, bounds.size.w - 16, 48);
   if (s_on_board) {
-    ArrivalRow *row = visible_arrival(index->row);
-    if (!row) {
+    RouteGroup groups[BOARD_SIZE];
+    if (index->row >= route_groups(groups)) {
       draw_text(ctx, s_notice ? s_notice : "Нет данных о прибытии", line, selected);
       return;
     }
-    int seconds = (int)difftime(row->arrival, time(NULL));
-    char text[96];
-    char eta[24];
-    if (seconds < 60) snprintf(eta, sizeof(eta), "< 1 мин");
-    else snprintf(eta, sizeof(eta), "%d мин", (seconds + 59) / 60);
-    snprintf(text, sizeof(text), "%s · %s", row->route, eta);
-    draw_text(ctx, text, GRect(8, 2, bounds.size.w - 16, 21), selected);
-    draw_text(ctx, row->live ? "прогноз" : "по расп.",
-              GRect(8, 21, bounds.size.w - 16, 21), selected);
+    draw_route_group(ctx, &groups[index->row], bounds.size.w, selected);
     return;
   }
 
@@ -407,18 +536,15 @@ static void draw_row(GContext *ctx, const Layer *layer, MenuIndex *index, void *
     ArrivalRow *arrival = &preview->rows[i];
     int seconds = (int)difftime(arrival->arrival, now);
     if (seconds <= 0 || (arrival->live && preview->expires <= now)) continue;
-    char eta[24];
-    if (seconds < 60) snprintf(eta, sizeof(eta), "< 1 мин");
-    else snprintf(eta, sizeof(eta), "%d мин", (seconds + 59) / 60);
-    const char *source = arrival->live ? "прогноз" : "по расп.";
-    int source_width = graphics_text_layout_get_content_size(source, s_font,
-      GRect(0, 0, 200, 22), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft).w + 2;
-    char text[64];
-    snprintf(text, sizeof(text), "%s · %s", arrival->route, eta);
-    draw_text(ctx, text, GRect(8, y, bounds.size.w - 22 - source_width, 22), selected);
-    draw_text(ctx, source, GRect(bounds.size.w - 8 - source_width, y, source_width, 22),
-              selected);
+    draw_arrival(ctx, arrival, GRect(8, y, bounds.size.w - 16, 22), selected);
     y += 20;
+    if (arrival->next[0]) {
+      graphics_context_set_text_color(ctx, selected ? GColorWhite : GColorBlack);
+      graphics_draw_text(ctx, arrival->next, s_small_font,
+                         GRect(37, y, bounds.size.w - 45, 18),
+                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      y += 18;
+    }
   }
 }
 
@@ -428,10 +554,12 @@ static int16_t header_height(MenuLayer *menu, uint16_t section, void *context) {
 
 static void draw_header(GContext *ctx, const Layer *layer, uint16_t section, void *context) {
   GRect bounds = layer_get_bounds(layer);
+  graphics_context_set_fill_color(ctx, HEADER_COLOR);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   draw_text(ctx, s_on_board ? s_title : "Ближайшие остановки",
-            GRect(8, 3, bounds.size.w - 16, 43), false);
+            GRect(8, 3, bounds.size.w - 16, 43), true);
   if (s_on_board && s_notice && s_count) {
-    draw_text(ctx, s_notice, GRect(8, 46, bounds.size.w - 16, 42), false);
+    draw_text(ctx, s_notice, GRect(8, 46, bounds.size.w - 16, 42), true);
   }
 }
 
@@ -530,11 +658,13 @@ int main(void) {
   s_window = window_create();
   Layer *root = window_get_root_layer(s_window);
   s_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_NOTO_18));
+  s_small_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_NOTO_14));
   s_menu = menu_layer_create(layer_get_bounds(root));
   menu_layer_set_callbacks(s_menu, NULL, (MenuLayerCallbacks) {
     .get_num_rows = row_count, .get_cell_height = row_height, .draw_row = draw_row,
     .get_header_height = header_height, .draw_header = draw_header, .select_click = select_row,
   });
+  menu_layer_set_highlight_colors(s_menu, SELECTED_COLOR, GColorWhite);
   window_set_click_config_provider(s_window, clicks);
   layer_add_child(root, menu_layer_get_layer(s_menu));
   window_stack_push(s_window, true);
@@ -555,6 +685,7 @@ int main(void) {
   cancel_timer(&s_timeout);
   app_message_deregister_callbacks();
   menu_layer_destroy(s_menu);
+  fonts_unload_custom_font(s_small_font);
   fonts_unload_custom_font(s_font);
   window_destroy(s_window);
 }

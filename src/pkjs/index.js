@@ -39,6 +39,8 @@ function preview(stop) {
   snapshot.rows.slice(0, 2).forEach(function (row, index) {
     message[index ? 'SecondRoute' : 'Route'] = row.route.slice(0, 16);
     message[index ? 'SecondArrival' : 'Arrival'] = row.time;
+    message[index ? 'SecondNextStop' : 'NextStop'] = (row.next || '').slice(0, 64);
+    message[index ? 'SecondVehicle' : 'Vehicle'] = row.kind || 0;
     message[index ? 'SecondLive' : 'Live'] = Number(row.live);
   });
   send(message);
@@ -62,8 +64,23 @@ function findStops(request) {
 }
 
 function offer(request, value, status) {
-  board.transfer = value;
-  reply(request, status, { Total: Math.min(value.rows.length, 20), Expires: value.expires });
+  // Reserve space for the first arrival of each route and source before adding more.
+  var seen = new Set();
+  var first = [];
+  var additional = [];
+  value.rows.forEach(function (row, index) {
+    var key = JSON.stringify([row.kind || 0, row.route, row.live, row.next || '']);
+    if (seen.has(key)) additional.push(index);
+    else {
+      seen.add(key);
+      first.push(index);
+    }
+  });
+  var rows = first.concat(additional).slice(0, 20).sort(function (a, b) {
+    return a - b;
+  }).map(function (index) { return value.rows[index]; });
+  board.transfer = { rows: rows };
+  reply(request, status, { Total: rows.length, Expires: value.expires });
 }
 
 function fetchBoard(request, index, command) {
@@ -125,7 +142,7 @@ Pebble.addEventListener('appmessage', function (event) {
     case 5:
       if (board && board.transfer && board.transfer.rows[index]) {
         var row = board.transfer.rows[index];
-        reply(request, 5, { Index: index, Route: row.route, Arrival: row.time, Live: Number(row.live) });
+        reply(request, 5, { Index: index, Route: row.route, Arrival: row.time, Live: Number(row.live), Vehicle: row.kind || 0, NextStop: (row.next || '').slice(0, 64) });
       }
       break;
     case 6:

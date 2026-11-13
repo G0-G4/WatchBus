@@ -57,13 +57,28 @@ function nearby(stops, lat, lon) {
     });
 }
 
-function live(board, uuid, now) {
+function vehicleKind(route) {
+  if (route.type === 'tram') return 3;
+  if (route.type === 'bus') return route.electrobus ? 2 : 1;
+  return 0;
+}
+
+function nextStop(stop, route, pathId) {
+  var directions = stop && stop[6];
+  if (!directions) return '';
+  return (pathId ? directions[0][pathId] : directions[1][route]) || '';
+}
+
+function live(board, uuid, now, stop) {
   if (!board || board.id !== uuid || !Array.isArray(board.routePath)) throw new Error('format');
   return board.routePath.reduce(function (rows, route) {
     if ((route.type !== 'bus' && route.type !== 'tram') || typeof route.number !== 'string') return rows;
     (route.externalForecast || []).forEach(function (forecast) {
       if (forecast.byTelemetry === 1 && Number.isFinite(forecast.time) && forecast.time > 0) {
-        rows.push({ route: route.number, time: now + forecast.time, live: true });
+        var row = { route: route.number, time: now + forecast.time, live: true, kind: vehicleKind(route) };
+        var next = nextStop(stop, route.number, forecast.routePathId);
+        if (next) row.next = next;
+        rows.push(row);
       }
     });
     return rows;
@@ -137,7 +152,7 @@ function scheduleTimes(document, internalId, stop, day) {
   return times;
 }
 
-function planned(stop, internalId, now, trigger) {
+function planned(stop, internalId, now, trigger, kinds) {
   var day = calendarDay(now);
   if (scheduleCacheDay !== day) {
     scheduleCache = {};
@@ -176,7 +191,7 @@ function planned(stop, internalId, now, trigger) {
         var key = [job.route[0], job.direction, time].join(':');
         if (time > now && !seen[key]) {
           seen[key] = true;
-          rows.push({ route: job.route[1], time: time, live: false });
+          rows.push({ route: job.route[1], time: time, live: false, kind: (kinds && kinds[job.route[1]]) || 0, next: nextStop(stop, job.route[1]) });
         }
       });
     }).catch(function (error) {
@@ -206,12 +221,18 @@ function forecast(stop, trigger) {
       var forecasts;
       try {
         board = JSON.parse(body);
-        forecasts = live(board, stop[0], now);
+        forecasts = live(board, stop[0], now, stop);
       } catch (error) {
         console.log('WatchBus ' + trigger + ' forecast error=format');
         throw new Error('format');
       }
-      return { rows: forecasts, expires: now + 120, internalId: board.internal_id };
+      var kinds = Object.create(null);
+      board.routePath.forEach(function (route) {
+        var kind = vehicleKind(route);
+        if (kind) kinds[route.number] = route.number in kinds && kinds[route.number] !== kind
+          ? 0 : kind;
+      });
+      return { rows: forecasts, expires: now + 120, internalId: board.internal_id, kinds: kinds };
     });
 }
 

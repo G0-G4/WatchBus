@@ -45,7 +45,7 @@ function create(onPreview) {
   function schedule(stop, trigger) {
     var data = entry(stop);
     if (!data.scheduleJob) {
-      data.scheduleJob = transport.planned(stop, data.forecast.internalId, now(), trigger)
+      data.scheduleJob = transport.planned(stop, data.forecast.internalId, now(), trigger, data.forecast.kinds)
         .then(function (result) {
           if (!result.failed || result.rows.length || !data.schedule) data.schedule = result;
           onPreview(stop);

@@ -1,7 +1,7 @@
 {
   "name": "watchbus",
   "author": "WatchBus",
-  "version": "1.2.2",
+  "version": "1.3.3",
   "private": true,
   "keywords": [
     "pebble-app"
@@ -51,7 +51,11 @@
       "Generation",
       "SecondRoute",
       "SecondArrival",
-      "SecondLive"
+      "SecondLive",
+      "Vehicle",
+      "SecondVehicle",
+      "NextStop",
+      "SecondNextStop"
     ],
     "resources": {
       "media": [
@@ -60,6 +64,18 @@
           "name": "FONT_NOTO_18",
           "file": "fonts/NotoSans-Regular.ttf",
           "characterRegex": "[ -~°·«»–—А-Яа-яЁё]"
+        },
+        {
+          "type": "font",
+          "name": "FONT_NOTO_14",
+          "file": "fonts/NotoSans-Regular.ttf",
+          "characterRegex": "[ -~°·«»–—А-Яа-яЁё]"
+        },
+        {
+          "type": "bitmap",
+          "name": "MENU_ICON",
+          "file": "images/watchbus-menu.png",
+          "menuIcon": true
         }
       ]
     }

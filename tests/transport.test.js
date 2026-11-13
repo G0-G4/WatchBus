@@ -11,9 +11,9 @@ test('only telemetry with a valid ETA is a live forecast', () => {
       { time: 90, byTelemetry: 0 }, { time: -1, byTelemetry: 1 }] },
   ];
   assert.deepEqual(live({ id: uuid, routePath }, uuid, 1000), [
-    { route: '688', time: 1050, live: true },
-    { route: '733', time: 1070, live: true },
-    { route: 'А', time: 1080, live: true },
+    { route: '688', time: 1050, live: true, kind: 1 },
+    { route: '733', time: 1070, live: true, kind: 2 },
+    { route: 'А', time: 1080, live: true, kind: 3 },
   ]);
   assert.deepEqual(live({ id: uuid, routePath: [] }, uuid, 1000), []);
   assert.throws(() => live({ id: 'another stop', routePath }, uuid, 1000), /format/);

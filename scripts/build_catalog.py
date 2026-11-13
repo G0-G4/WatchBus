@@ -99,12 +99,13 @@ def route_stops(route, cache):
                 if not (stop.get('id') and stop.get('lat') and stop.get('lon')):
                     continue
                 entry = stops.setdefault(stop['id'], {
-                    **stop, 'next_names': set(),
+                    **stop, 'next_names': set(), 'next_paths': {},
                 })
                 if index + 1 < len(sequence):
                     next_name = sequence[index + 1].get('name')
                     if next_name:
                         entry['next_names'].add(next_name)
+                        entry['next_paths'].setdefault(path['id'], set()).add(next_name)
     return stops
 
 
@@ -149,6 +150,7 @@ def main():
     catalog = {}
     missing = []
     directions = {}
+    route_directions = {}
 
     def collect(row):
         if rate_limited.is_set():
@@ -169,6 +171,10 @@ def main():
             for uuid, stop in stops.items():
                 entry = catalog.setdefault(uuid, [uuid, stop['name'], stop['lat'], stop['lon'], []])
                 directions.setdefault(uuid, set()).update(stop['next_names'])
+                by_path, by_route = route_directions.setdefault(uuid, ({}, {}))
+                for path_id, names in stop['next_paths'].items():
+                    by_path.setdefault(path_id, set()).update(names)
+                by_route.setdefault(row[1], set()).update(stop['next_names'])
                 if [row[0], row[1]] not in entry[4]:
                     entry[4].append([row[0], row[1]])
             if index % 50 == 0:
@@ -181,6 +187,12 @@ def main():
             extra = len(known) - 2
             suffix = f' (+{extra})' if extra > 0 else ''
             entry.append('Далее: ' + ' / '.join(known[:2]) + suffix)
+    for uuid, (by_path, by_route) in route_directions.items():
+        entry = catalog[uuid]
+        if len(entry) == 5:
+            entry.append(None)
+        entry.append([{key: next(iter(names)) for key, names in source.items()
+                       if len(names) == 1} for source in (by_path, by_route)])
     payload = {'routes': len(rows), 'unresolved': missing, 'stops': sorted(catalog.values())}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix('.tmp')
