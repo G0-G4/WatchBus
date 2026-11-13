@@ -7,7 +7,7 @@ typedef struct {
   int index;
   bool loaded;
   char name[200];
-  char detail[160];
+  char detail[224];
 } StopRow;
 
 typedef struct {
@@ -15,6 +15,12 @@ typedef struct {
   bool live;
   char route[24];
 } ArrivalRow;
+
+typedef struct {
+  int index;
+  time_t expires;
+  ArrivalRow rows[2];
+} Preview;
 
 static Window *s_window;
 static MenuLayer *s_menu;
@@ -25,7 +31,11 @@ static int s_marquee_row = -1;
 static int s_marquee_offset;
 static StopRow s_stops[CACHE_SIZE];
 static ArrivalRow s_board[BOARD_SIZE], s_next_board[BOARD_SIZE];
-static unsigned s_request;
+static unsigned s_request, s_generation, s_board_request;
+static Preview s_previews[CACHE_SIZE];
+static bool s_intermediate, s_final_ready, s_waiting_final;
+static int s_focus_sent = -2;
+static AppTimer *s_focus_timer;
 static int s_stop_count, s_selected, s_count, s_next_count, s_next_index;
 static int s_requested_row = -1;
 static time_t s_expiry, s_next_expiry;
@@ -49,6 +59,7 @@ static void cancel_timer(AppTimer **timer) {
 static void failed(const char *notice) {
   cancel_timer(&s_timeout);
   s_busy = false;
+  s_waiting_final = false;
   s_requested_row = -1;
   s_request++;
   s_notice = s_on_board && s_count ? "Не удалось обновить" : notice;
@@ -62,16 +73,25 @@ static void timed_out(void *context) {
 
 static bool send(int command, int index) {
   DictionaryIterator *outbox;
+  unsigned request = command == 6 ? s_request : ++s_request;
   if (app_message_outbox_begin(&outbox) != APP_MSG_OK ||
       dict_write_int32(outbox, MESSAGE_KEY_Command, command) != DICT_OK ||
-      dict_write_int32(outbox, MESSAGE_KEY_Request, ++s_request) != DICT_OK ||
+      dict_write_int32(outbox, MESSAGE_KEY_Request, request) != DICT_OK ||
       dict_write_int32(outbox, MESSAGE_KEY_Index, index) != DICT_OK ||
       app_message_outbox_send() != APP_MSG_OK) {
-    failed("Проверьте связь с телефоном");
+    if (command != 6) failed("Проверьте связь с телефоном");
     return false;
   }
+  if (command == 6) {
+    return true;
+  }
+  if (command == 3 || command == 4 || command == 8) {
+    s_board_request = s_request;
+    s_waiting_final = false;
+    s_final_ready = false;
+  }
   cancel_timer(&s_timeout);
-  s_timeout = app_timer_register(command == 3 || command == 4 ? 90000 : 15000,
+  s_timeout = app_timer_register(command == 3 || command == 4 || command == 8 ? 90000 : 15000,
                                  timed_out, NULL);
   return true;
 }
@@ -79,6 +99,9 @@ static bool send(int command, int index) {
 static void search(void) {
   s_stop_count = 0;
   memset(s_stops, 0, sizeof(s_stops));
+  memset(s_previews, 0, sizeof(s_previews));
+  s_generation = 0;
+  s_focus_sent = -2;
   s_requested_row = -1;
   s_notice = s_ready ? "Поиск остановок..." : "Подключение к телефону...";
   s_busy = s_ready;
@@ -125,11 +148,39 @@ static void copy_text(DictionaryIterator *iterator, uint32_t key, char *out, siz
   out[length] = 0;
 }
 
+static void notify_focus(void *context) {
+  s_focus_timer = NULL;
+  if (s_on_board) return;
+  if (s_timeout) {
+    s_focus_timer = app_timer_register(150, notify_focus, NULL);
+    return;
+  }
+  int index = menu_layer_get_selected_index(s_menu).row;
+  if (index >= s_stop_count) index = -1;
+  if (index != s_focus_sent && s_ready) {
+    if (send(6, index)) s_focus_sent = index;
+    else s_focus_timer = app_timer_register(150, notify_focus, NULL);
+  }
+}
+
+static void update_focus(void) {
+  cancel_timer(&s_focus_timer);
+  s_focus_timer = app_timer_register(100, notify_focus, NULL);
+}
+
 static void commit_board(void) {
   memcpy(s_board, s_next_board, s_next_count * sizeof(s_board[0]));
   s_count = s_next_count;
   s_expiry = s_next_expiry;
-  s_busy = false;
+  s_busy = s_intermediate;
+  s_waiting_final = s_intermediate;
+  if (s_intermediate) {
+    if (s_final_ready) {
+      s_waiting_final = false;
+      send(7, 0);
+    }
+    else s_timeout = app_timer_register(90000, timed_out, NULL);
+  }
   s_notice = s_partial ? "Расписание загружено частично" : NULL;
   redraw();
 }
@@ -145,16 +196,43 @@ static void inbox(DictionaryIterator *iterator, void *context) {
     }
     return;
   }
+  int status = number(iterator, MESSAGE_KEY_Status);
+  int index = number(iterator, MESSAGE_KEY_Index);
+  if (status == 6) {
+    if (!s_generation || (unsigned)number(iterator, MESSAGE_KEY_Generation) != s_generation ||
+        index < 0 || index >= s_stop_count) return;
+    Preview *preview = &s_previews[index % CACHE_SIZE];
+    preview->index = index;
+    preview->expires = number(iterator, MESSAGE_KEY_Expires);
+    preview->rows[0].arrival = number(iterator, MESSAGE_KEY_Arrival);
+    preview->rows[0].live = number(iterator, MESSAGE_KEY_Live);
+    copy_text(iterator, MESSAGE_KEY_Route, preview->rows[0].route, sizeof(preview->rows[0].route));
+    preview->rows[1].arrival = number(iterator, MESSAGE_KEY_SecondArrival);
+    preview->rows[1].live = number(iterator, MESSAGE_KEY_SecondLive);
+    copy_text(iterator, MESSAGE_KEY_SecondRoute, preview->rows[1].route, sizeof(preview->rows[1].route));
+    if (!s_on_board) layer_mark_dirty(menu_layer_get_layer(s_menu));
+    return;
+  }
+  if (status == 8) {
+    if (!s_on_board || !s_busy ||
+        (unsigned)number(iterator, MESSAGE_KEY_Generation) != s_board_request) return;
+    s_final_ready = true;
+    if (s_waiting_final) {
+      s_waiting_final = false;
+      send(7, 0);
+    }
+    return;
+  }
   if (!s_timeout || !dict_find(iterator, MESSAGE_KEY_Request) ||
       (unsigned)number(iterator, MESSAGE_KEY_Request) != s_request) return;
   cancel_timer(&s_timeout);
-  int status = number(iterator, MESSAGE_KEY_Status);
-  int index = number(iterator, MESSAGE_KEY_Index);
   if (status < 0) {
     failed(status == -1 ? "Проверьте геолокацию телефона" : "Данные недоступны");
   } else if (status == 1) {
     s_busy = false;
+    s_generation = s_request;
     s_stop_count = number(iterator, MESSAGE_KEY_Total);
+    update_focus();
     s_notice = s_stop_count ? NULL : "Рядом нет остановок";
     redraw();
   } else if (status == 2 && !s_on_board && index == s_requested_row) {
@@ -165,7 +243,7 @@ static void inbox(DictionaryIterator *iterator, void *context) {
     copy_text(iterator, MESSAGE_KEY_Detail, row->detail, sizeof(row->detail));
     s_requested_row = -1;
     redraw();
-  } else if ((status == 3 || status == 4) && s_on_board) {
+  } else if ((status == 3 || status == 4 || status == 7) && s_on_board) {
     s_next_count = number(iterator, MESSAGE_KEY_Total);
     if (s_next_count < 0 || s_next_count > BOARD_SIZE) {
       failed("Данные недоступны");
@@ -174,6 +252,8 @@ static void inbox(DictionaryIterator *iterator, void *context) {
     s_next_expiry = number(iterator, MESSAGE_KEY_Expires);
     s_next_index = 0;
     s_partial = status == 4;
+    s_intermediate = status == 7;
+    s_waiting_final = false;
     if (s_next_count) send(5, 0);
     else commit_board();
   } else if (status == 5 && s_on_board && index == s_next_index && index < s_next_count) {
@@ -192,7 +272,12 @@ static void request_row(void *context) {
 }
 
 static void outbox_failed(DictionaryIterator *iterator, AppMessageResult reason, void *context) {
-  failed("Проверьте связь с телефоном");
+  if (number(iterator, MESSAGE_KEY_Command) == 6) {
+    s_focus_sent = -2;
+    update_focus();
+  } else {
+    failed("Проверьте связь с телефоном");
+  }
 }
 
 static ArrivalRow *visible_arrival(int index) {
@@ -213,7 +298,7 @@ static uint16_t row_count(MenuLayer *menu, uint16_t section, void *context) {
 }
 
 static int16_t row_height(MenuLayer *menu, MenuIndex *index, void *context) {
-  return s_on_board ? 43 : 87;
+  return s_on_board ? 43 : index->row < s_stop_count ? 128 : 57;
 }
 
 static void draw_text(GContext *ctx, const char *text, GRect bounds, bool selected) {
@@ -314,6 +399,27 @@ static void draw_row(GContext *ctx, const Layer *layer, MenuIndex *index, void *
     line.origin.y += 20;
     draw_direction(ctx, direction + 1, line, index->row, selected);
   }
+  Preview *preview = &s_previews[index->row % CACHE_SIZE];
+  if (preview->index != index->row) return;
+  time_t now = time(NULL);
+  int y = 84;
+  for (int i = 0; i < 2; i++) {
+    ArrivalRow *arrival = &preview->rows[i];
+    int seconds = (int)difftime(arrival->arrival, now);
+    if (seconds <= 0 || (arrival->live && preview->expires <= now)) continue;
+    char eta[24];
+    if (seconds < 60) snprintf(eta, sizeof(eta), "< 1 мин");
+    else snprintf(eta, sizeof(eta), "%d мин", (seconds + 59) / 60);
+    const char *source = arrival->live ? "прогноз" : "по расп.";
+    int source_width = graphics_text_layout_get_content_size(source, s_font,
+      GRect(0, 0, 200, 22), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft).w + 2;
+    char text[64];
+    snprintf(text, sizeof(text), "%s · %s", arrival->route, eta);
+    draw_text(ctx, text, GRect(8, y, bounds.size.w - 22 - source_width, 22), selected);
+    draw_text(ctx, source, GRect(bounds.size.w - 8 - source_width, y, source_width, 22),
+              selected);
+    y += 20;
+  }
 }
 
 static int16_t header_height(MenuLayer *menu, uint16_t section, void *context) {
@@ -346,7 +452,21 @@ static void select_row(MenuLayer *menu, MenuIndex *index, void *context) {
     snprintf(s_title, sizeof(s_title), "%s", row->name);
     s_on_board = true;
     s_count = 0;
-    refresh_board(false);
+    Preview *preview = &s_previews[s_selected % CACHE_SIZE];
+    if (preview->index == s_selected) {
+      time_t now = time(NULL);
+      s_expiry = preview->expires;
+      for (int i = 0; i < 2; i++) {
+        ArrivalRow *row = &preview->rows[i];
+        if (row->arrival > now && (!row->live || s_expiry > now)) {
+          s_board[s_count++] = *row;
+        }
+      }
+    }
+    s_busy = true;
+    s_notice = s_count ? NULL : "Загрузка табло...";
+    send(8, s_selected);
+    redraw();
     menu_layer_set_selected_index(s_menu, MenuIndex(0, 0), MenuRowAlignTop, false);
     s_auto_timer = app_timer_register(60000, auto_refresh, NULL);
   }
@@ -365,6 +485,8 @@ static void back(ClickRecognizerRef recognizer, void *context) {
   s_notice = NULL;
   redraw();
   menu_layer_set_selected_index(s_menu, MenuIndex(0, s_selected), MenuRowAlignCenter, false);
+  s_focus_sent = -2;
+  update_focus();
 }
 
 static void move_selection(int delta) {
@@ -373,6 +495,7 @@ static void move_selection(int delta) {
   if (next >= 0 && next < row_count(s_menu, 0, NULL)) {
     reset_marquee();
     menu_layer_set_selected_index(s_menu, MenuIndex(0, next), MenuRowAlignCenter, true);
+    if (!s_on_board) update_focus();
   }
 }
 
@@ -397,7 +520,10 @@ static void clicks(void *context) {
 }
 
 static void tick(struct tm *local_time, TimeUnits units) {
-  if (s_on_board && local_time->tm_sec % 5 == 0) redraw();
+  if (local_time->tm_sec % 5 == 0) {
+    if (s_on_board) redraw();
+    else layer_mark_dirty(menu_layer_get_layer(s_menu));
+  }
 }
 
 int main(void) {
@@ -421,6 +547,7 @@ int main(void) {
   }
   tick_timer_service_subscribe(SECOND_UNIT, tick);
   app_event_loop();
+  cancel_timer(&s_focus_timer);
   reset_marquee();
   tick_timer_service_unsubscribe();
   cancel_timer(&s_auto_timer);

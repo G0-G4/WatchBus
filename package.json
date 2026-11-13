@@ -1,7 +1,7 @@
 {
   "name": "watchbus",
   "author": "WatchBus",
-  "version": "1.1.3",
+  "version": "1.2.2",
   "private": true,
   "keywords": [
     "pebble-app"
@@ -47,7 +47,11 @@
       "Route",
       "Arrival",
       "Live",
-      "Expires"
+      "Expires",
+      "Generation",
+      "SecondRoute",
+      "SecondArrival",
+      "SecondLive"
     ],
     "resources": {
       "media": [

@@ -198,7 +198,7 @@ function mergeArrivals(forecasts, schedule) {
   });
 }
 
-function arrivals(stop, trigger) {
+function forecast(stop, trigger) {
   return request(API + 'stop_v2/' + encodeURIComponent(stop[0]), 'forecast', trigger)
     .then(function (body) {
       var now = Math.floor(Date.now() / 1000);
@@ -211,11 +211,8 @@ function arrivals(stop, trigger) {
         console.log('WatchBus ' + trigger + ' forecast error=format');
         throw new Error('format');
       }
-      return planned(stop, board.internal_id, now, trigger).then(function (schedule) {
-        return { rows: mergeArrivals(forecasts, schedule.rows), expires: now + 120,
-          partial: schedule.failed };
-      });
+      return { rows: forecasts, expires: now + 120, internalId: board.internal_id };
     });
 }
 
-module.exports = { nearby: nearby, live: live, scheduleTimes: scheduleTimes, arrivals: arrivals, mergeArrivals: mergeArrivals };
+module.exports = { nearby: nearby, live: live, scheduleTimes: scheduleTimes, forecast: forecast, planned: planned, mergeArrivals: mergeArrivals };

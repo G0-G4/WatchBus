@@ -94,18 +94,17 @@ def route_stops(route, cache):
     stops = {}
     for direction in data['directions']:
         for path in direction['routePaths']:
-            destination = path.get('endStopName') or direction.get('lastStopName')
             sequence = path['stops']
             for index, stop in enumerate(sequence):
                 if not (stop.get('id') and stop.get('lat') and stop.get('lon')):
                     continue
                 entry = stops.setdefault(stop['id'], {
-                    **stop, 'next_names': set(), 'destinations': set(),
+                    **stop, 'next_names': set(),
                 })
                 if index + 1 < len(sequence):
                     next_name = sequence[index + 1].get('name')
-                    entry['next_names'].add(next_name if next_name != stop['name'] else None)
-                    entry['destinations'].add(destination if destination != stop['name'] else None)
+                    if next_name:
+                        entry['next_names'].add(next_name)
     return stops
 
 
@@ -169,9 +168,7 @@ def main():
                 missing.append(row[:3])
             for uuid, stop in stops.items():
                 entry = catalog.setdefault(uuid, [uuid, stop['name'], stop['lat'], stop['lon'], []])
-                next_names, destinations = directions.setdefault(uuid, (set(), set()))
-                next_names.update(stop['next_names'])
-                destinations.update(stop['destinations'])
+                directions.setdefault(uuid, set()).update(stop['next_names'])
                 if [row[0], row[1]] not in entry[4]:
                     entry[4].append([row[0], row[1]])
             if index % 50 == 0:
@@ -179,11 +176,11 @@ def main():
     if rate_limited.is_set():
         raise SystemExit('Source returned HTTP 429. Rerun after the server pause.')
     for uuid, entry in catalog.items():
-        next_names, destinations = directions[uuid]
-        if len(next_names) == 1 and None not in next_names:
-            entry.append('Далее: ' + next(iter(next_names)))
-        elif len(destinations) == 1 and None not in destinations:
-            entry.append('В сторону: ' + next(iter(destinations)))
+        known = sorted(directions[uuid])
+        if known:
+            extra = len(known) - 2
+            suffix = f' (+{extra})' if extra > 0 else ''
+            entry.append('Далее: ' + ' / '.join(known[:2]) + suffix)
     payload = {'routes': len(rows), 'unresolved': missing, 'stops': sorted(catalog.values())}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix('.tmp')
