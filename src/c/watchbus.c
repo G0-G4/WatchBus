@@ -332,12 +332,13 @@ static uint16_t row_count(MenuLayer *menu, uint16_t section, void *context) {
   return count ? count : 1;
 }
 
+#ifndef PBL_ROUND
 static int16_t row_height(MenuLayer *menu, MenuIndex *index, void *context) {
   if (!s_on_board) {
     if (index->row >= s_stop_count) return 57;
     Preview *preview = &s_previews[index->row % CACHE_SIZE];
-    if (preview->index != index->row) return 128;
-    return 128 + 18 * (!!preview->rows[0].next[0] + !!preview->rows[1].next[0]);
+    if (preview->index != index->row) return PBL_IF_ROUND_ELSE(138, 128);
+    return PBL_IF_ROUND_ELSE(138, 128) + 18 * (!!preview->rows[0].next[0] + !!preview->rows[1].next[0]);
   }
   static RouteGroup groups[BOARD_SIZE];
   int count = route_groups(groups);
@@ -346,6 +347,12 @@ static int16_t row_height(MenuLayer *menu, MenuIndex *index, void *context) {
   return (group->counts[0] && group->counts[1] ? 68 : 48) +
          (group->first->next[0] ? 18 : 0);
 }
+
+#endif
+
+#define ROW_INSET PBL_IF_ROUND_ELSE(22, 8)
+#define HEADER_INSET PBL_IF_ROUND_ELSE(32, 8)
+#define ROUTE_NEXT_INSET PBL_IF_ROUND_ELSE(22, 37)
 
 // Keep rendering helpers out of the menu callback's stack frame.
 static __attribute__((noinline)) void draw_text(GContext *ctx, const char *text,
@@ -455,16 +462,20 @@ static __attribute__((noinline)) void draw_arrival(GContext *ctx, const ArrivalR
                      GTextAlignmentRight, NULL);
 }
 
-static void draw_route_group(GContext *ctx, const RouteGroup *group, int width, bool selected) {
+static void draw_route_group(GContext *ctx, const RouteGroup *group,
+                             int width, bool selected) {
   const ArrivalRow *first = group->first;
-  draw_vehicle(ctx, GPoint(8, 3), first->vehicle);
-  int title_x = first->vehicle ? 37 : 8;
-  draw_text(ctx, first->route, GRect(title_x, 2, width - title_x - 8, 22), selected);
+  GRect title = GRect(ROW_INSET, 2, width - 2 * ROW_INSET, 22);
+  draw_vehicle(ctx, GPoint(title.origin.x, 3), first->vehicle);
+  int icon_width = first->vehicle ? 29 : 0;
+  title.origin.x += icon_width;
+  title.size.w -= icon_width;
+  draw_text(ctx, first->route, title, selected);
 
   int y = 24;
   graphics_context_set_text_color(ctx, selected ? GColorWhite : GColorBlack);
   if (first->next[0]) {
-    graphics_draw_text(ctx, first->next, s_small_font, GRect(title_x, y, width - title_x - 8, 18),
+    graphics_draw_text(ctx, first->next, s_small_font, GRect(ROW_INSET + icon_width, y, width - 2 * ROW_INSET - icon_width, 18),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     y += 18;
   }
@@ -481,18 +492,20 @@ static void draw_route_group(GContext *ctx, const RouteGroup *group, int width, 
     }
     size_t used = strlen(times);
     snprintf(times + used, sizeof(times) - used, " мин");
+    GRect times_line = GRect(ROW_INSET, y, width - 2 * ROW_INSET, 20);
     graphics_draw_text(ctx, source ? "по расп." : "прогноз", s_small_font,
-                       GRect(8, y, 62, 20), GTextOverflowModeTrailingEllipsis,
+                       GRect(times_line.origin.x, y, 62, 20), GTextOverflowModeTrailingEllipsis,
                        GTextAlignmentLeft, NULL);
-    graphics_draw_text(ctx, times, s_small_font, GRect(72, y, width - 80, 20),
+    graphics_draw_text(ctx, times, s_small_font, GRect(times_line.origin.x + 64, y, times_line.size.w - 64, 20),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     y += 20;
   }
 }
 
+#ifndef PBL_ROUND
 static __attribute__((noinline)) void draw_board_row(GContext *ctx, uint16_t row,
                                                         int width, bool selected) {
-  GRect line = GRect(8, 4, width - 16, 48);
+  GRect line = GRect(ROW_INSET, 4, width - 2 * ROW_INSET, 48);
   static RouteGroup groups[BOARD_SIZE];
   if (row >= route_groups(groups)) {
     draw_text(ctx, s_notice ? s_notice : "Нет данных о прибытии", line, selected);
@@ -504,7 +517,7 @@ static __attribute__((noinline)) void draw_board_row(GContext *ctx, uint16_t row
 static void draw_row(GContext *ctx, const Layer *layer, MenuIndex *index, void *context) {
   GRect bounds = layer_get_bounds(layer);
   bool selected = menu_cell_layer_is_highlighted(layer);
-  GRect line = GRect(8, 4, bounds.size.w - 16, 48);
+  GRect line = GRect(ROW_INSET, 4, bounds.size.w - 2 * ROW_INSET, 48);
   if (s_on_board) {
     draw_board_row(ctx, index->row, bounds.size.w, selected);
     return;
@@ -523,9 +536,10 @@ static void draw_row(GContext *ctx, const Layer *layer, MenuIndex *index, void *
     draw_text(ctx, "Загрузка...", line, selected);
     return;
   }
+  line.origin.y = PBL_IF_ROUND_ELSE(15, 4);
   line.size.h = 42;
   draw_text(ctx, row->name, line, selected);
-  line.origin.y = 43;
+  line.origin.y = PBL_IF_ROUND_ELSE(54, 43);
   line.size.h = 22;
   const char *direction = strchr(row->detail, '\n');
   char distance[24];
@@ -541,17 +555,17 @@ static void draw_row(GContext *ctx, const Layer *layer, MenuIndex *index, void *
   Preview *preview = &s_previews[index->row % CACHE_SIZE];
   if (preview->index != index->row) return;
   time_t now = time(NULL);
-  int y = 84;
+  int y = PBL_IF_ROUND_ELSE(94, 84);
   for (int i = 0; i < 2; i++) {
     ArrivalRow *arrival = &preview->rows[i];
     int seconds = (int)difftime(arrival->arrival, now);
     if (seconds <= 0 || (arrival->live && preview->expires <= now)) continue;
-    draw_arrival(ctx, arrival, GRect(8, y, bounds.size.w - 16, 22), selected);
+    draw_arrival(ctx, arrival, GRect(ROW_INSET, y, bounds.size.w - 2 * ROW_INSET, 22), selected);
     y += 20;
     if (arrival->next[0]) {
       graphics_context_set_text_color(ctx, selected ? GColorWhite : GColorBlack);
       graphics_draw_text(ctx, arrival->next, s_small_font,
-                         GRect(37, y, bounds.size.w - 45, 18),
+                         GRect(ROUTE_NEXT_INSET, y, bounds.size.w - ROUTE_NEXT_INSET - ROW_INSET, 18),
                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
       y += 18;
     }
@@ -567,11 +581,92 @@ static void draw_header(GContext *ctx, const Layer *layer, uint16_t section, voi
   graphics_context_set_fill_color(ctx, HEADER_COLOR);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   draw_text(ctx, s_on_board ? s_title : "Ближайшие остановки",
-            GRect(8, 3, bounds.size.w - 16, 43), true);
+            GRect(HEADER_INSET, PBL_IF_ROUND_ELSE(13, 3), bounds.size.w - 2 * HEADER_INSET, 43), true);
   if (s_on_board && s_notice && s_count) {
-    draw_text(ctx, s_notice, GRect(8, 46, bounds.size.w - 16, 42), true);
+    draw_text(ctx, s_notice, GRect(HEADER_INSET, 46, bounds.size.w - 2 * HEADER_INSET, 42), true);
   }
 }
+
+#endif
+
+#ifdef PBL_ROUND
+static int16_t round_row_height(MenuLayer *menu, MenuIndex *index, void *context) {
+  return menu_layer_is_index_selected(menu, index) ? 112 : 32;
+}
+
+static __attribute__((noinline)) void round_text(GContext *ctx, const char *text, GFont font,
+                                                GRect bounds, bool selected) {
+  graphics_context_set_text_color(ctx, selected ? GColorWhite : GColorBlack);
+  graphics_draw_text(ctx, text, font, bounds, GTextOverflowModeTrailingEllipsis,
+                     GTextAlignmentCenter, NULL);
+}
+
+static __attribute__((noinline)) void round_stop(GContext *ctx, uint16_t index, bool selected) {
+  if (index >= s_stop_count) {
+    round_text(ctx, s_notice ? s_notice : "Обновить", s_font,
+               selected ? GRect(24, 32, 132, 48) : GRect(36, 3, 108, 24), selected);
+    return;
+  }
+  StopRow *stop = &s_stops[index % CACHE_SIZE];
+  if (!stop->loaded || stop->index != index) {
+    if (selected && s_requested_row < 0 && !s_busy && !s_notice) {
+      s_requested_row = index;
+      s_row_timer = app_timer_register(1, request_row, NULL);
+    }
+    round_text(ctx, "Загрузка...", s_font,
+               selected ? GRect(24, 44, 132, 24) : GRect(36, 3, 108, 24), selected);
+    return;
+  }
+  if (!selected) {
+    round_text(ctx, stop->name, s_small_font, GRect(36, 6, 108, 20), false);
+    return;
+  }
+  round_text(ctx, stop->name, s_font, GRect(22, 3, 136, 41), true);
+  const char *direction = strchr(stop->detail, '\n');
+  char distance[24];
+  size_t length = direction ? (size_t)(direction - stop->detail) : strlen(stop->detail);
+  if (length >= sizeof(distance)) length = sizeof(distance) - 1;
+  memcpy(distance, stop->detail, length);
+  distance[length] = '\0';
+  round_text(ctx, distance, s_small_font, GRect(16, 43, 148, 19), true);
+  if (direction) {
+    draw_direction(ctx, direction + 1, GRect(16, 61, 148, 22), index, true);
+  }
+  Preview *preview = &s_previews[index % CACHE_SIZE];
+  if (preview->index != index) return;
+  time_t now = time(NULL);
+  for (int i = 0; i < 2; i++) {
+    const ArrivalRow *arrival = &preview->rows[i];
+    if (arrival->arrival <= now || (arrival->live && preview->expires <= now)) continue;
+    draw_arrival(ctx, arrival, GRect(18, 85, 144, 22), true);
+    break;
+  }
+}
+
+static __attribute__((noinline)) void round_board(GContext *ctx, uint16_t index, bool selected) {
+  static RouteGroup groups[BOARD_SIZE];
+  if (index >= route_groups(groups)) {
+    round_text(ctx, s_notice ? s_notice : "Нет данных о прибытии", s_font,
+               GRect(24, 32, 132, 48), selected);
+    return;
+  }
+  if (!selected) {
+    round_text(ctx, groups[index].first->route, s_small_font, GRect(36, 6, 108, 20), false);
+    return;
+  }
+  draw_route_group(ctx, &groups[index], 180, true);
+  if (s_notice) {
+    round_text(ctx, s_notice, s_small_font, GRect(24, 87, 132, 22), true);
+  }
+}
+
+static void round_draw_row(GContext *ctx, const Layer *layer, MenuIndex *index, void *context) {
+  bool selected = layer_get_bounds(layer).size.h > 32;
+  if (s_on_board) round_board(ctx, index->row, selected);
+  else round_stop(ctx, index->row, selected);
+}
+
+#endif
 
 static void select_row(MenuLayer *menu, MenuIndex *index, void *context) {
   reset_marquee();
@@ -605,7 +700,7 @@ static void select_row(MenuLayer *menu, MenuIndex *index, void *context) {
     s_notice = s_count ? NULL : "Загрузка табло...";
     send(8, s_selected);
     redraw();
-    menu_layer_set_selected_index(s_menu, MenuIndex(0, 0), MenuRowAlignTop, false);
+    menu_layer_set_selected_index(s_menu, MenuIndex(0, 0), PBL_IF_ROUND_ELSE(MenuRowAlignCenter, MenuRowAlignTop), false);
     s_auto_timer = app_timer_register(60000, auto_refresh, NULL);
   }
 }
@@ -632,7 +727,11 @@ static void move_selection(int delta) {
   int next = (int)index.row + delta;
   if (next >= 0 && next < row_count(s_menu, 0, NULL)) {
     reset_marquee();
-    menu_layer_set_selected_index(s_menu, MenuIndex(0, next), MenuRowAlignCenter, true);
+    menu_layer_set_selected_index(s_menu, MenuIndex(0, next), MenuRowAlignCenter, PBL_IF_ROUND_ELSE(false, true));
+#ifdef PBL_ROUND
+    redraw();
+    menu_layer_set_selected_index(s_menu, MenuIndex(0, next), MenuRowAlignCenter, false);
+#endif
     if (!s_on_board) update_focus();
   }
 }
@@ -671,8 +770,13 @@ static __attribute__((noinline)) void init(void) {
   s_small_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_NOTO_14));
   s_menu = menu_layer_create(layer_get_bounds(root));
   menu_layer_set_callbacks(s_menu, NULL, (MenuLayerCallbacks) {
-    .get_num_rows = row_count, .get_cell_height = row_height, .draw_row = draw_row,
-    .get_header_height = header_height, .draw_header = draw_header, .select_click = select_row,
+    .get_num_rows = row_count, .select_click = select_row,
+#ifdef PBL_ROUND
+    .get_cell_height = round_row_height, .draw_row = round_draw_row,
+#else
+    .get_cell_height = row_height, .draw_row = draw_row,
+    .get_header_height = header_height, .draw_header = draw_header,
+#endif
   });
   menu_layer_set_highlight_colors(s_menu, SELECTED_COLOR, GColorWhite);
   window_set_click_config_provider(s_window, clicks);
