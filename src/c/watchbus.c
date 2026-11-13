@@ -529,8 +529,10 @@ static void draw_row(GContext *ctx, const Layer *layer, MenuIndex *index, void *
   line.size.h = 22;
   const char *direction = strchr(row->detail, '\n');
   char distance[24];
-  snprintf(distance, sizeof(distance), "%.*s",
-           direction ? (int)(direction - row->detail) : (int)strlen(row->detail), row->detail);
+  size_t length = direction ? (size_t)(direction - row->detail) : strlen(row->detail);
+  if (length >= sizeof(distance)) length = sizeof(distance) - 1;
+  memcpy(distance, row->detail, length);
+  distance[length] = '\0';
   draw_text(ctx, distance, line, selected);
   if (direction) {
     line.origin.y += 20;
@@ -662,7 +664,7 @@ static void tick(struct tm *local_time, TimeUnits units) {
   }
 }
 
-int main(void) {
+static __attribute__((noinline)) void init(void) {
   s_window = window_create();
   Layer *root = window_get_root_layer(s_window);
   s_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_NOTO_18));
@@ -684,6 +686,10 @@ int main(void) {
     failed("Проверьте связь с телефоном");
   }
   tick_timer_service_subscribe(SECOND_UNIT, tick);
+}
+
+int main(void) {
+  init();
   app_event_loop();
   cancel_timer(&s_focus_timer);
   reset_marquee();
