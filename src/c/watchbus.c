@@ -327,7 +327,7 @@ static int route_groups(RouteGroup groups[BOARD_SIZE]) {
 
 static uint16_t row_count(MenuLayer *menu, uint16_t section, void *context) {
   if (!s_on_board) return s_stop_count + 1;
-  RouteGroup groups[BOARD_SIZE];
+  static RouteGroup groups[BOARD_SIZE];
   int count = route_groups(groups);
   return count ? count : 1;
 }
@@ -339,7 +339,7 @@ static int16_t row_height(MenuLayer *menu, MenuIndex *index, void *context) {
     if (preview->index != index->row) return 128;
     return 128 + 18 * (!!preview->rows[0].next[0] + !!preview->rows[1].next[0]);
   }
-  RouteGroup groups[BOARD_SIZE];
+  static RouteGroup groups[BOARD_SIZE];
   int count = route_groups(groups);
   if (index->row >= count) return 48;
   RouteGroup *group = &groups[index->row];
@@ -347,7 +347,9 @@ static int16_t row_height(MenuLayer *menu, MenuIndex *index, void *context) {
          (group->first->next[0] ? 18 : 0);
 }
 
-static void draw_text(GContext *ctx, const char *text, GRect bounds, bool selected) {
+// Keep rendering helpers out of the menu callback's stack frame.
+static __attribute__((noinline)) void draw_text(GContext *ctx, const char *text,
+                                                 GRect bounds, bool selected) {
   graphics_context_set_text_color(ctx, selected ? GColorWhite : GColorBlack);
   graphics_draw_text(ctx, text, s_font, bounds, GTextOverflowModeTrailingEllipsis,
                      GTextAlignmentLeft, NULL);
@@ -366,8 +368,8 @@ static void marquee_tick(void *context) {
   layer_mark_dirty(menu_layer_get_layer(s_menu));
 }
 
-static void draw_direction(GContext *ctx, const char *text, GRect line,
-                           int row, bool selected) {
+static __attribute__((noinline)) void draw_direction(GContext *ctx, const char *text, GRect line,
+                                                      int row, bool selected) {
   GRect measure = GRect(0, 0, 2048, line.size.h);
   int width = graphics_text_layout_get_content_size(text, s_font, measure,
     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft).w;
@@ -397,7 +399,7 @@ static void draw_direction(GContext *ctx, const char *text, GRect line,
   }
 }
 
-static void draw_vehicle(GContext *ctx, GPoint position, uint8_t vehicle) {
+static __attribute__((noinline)) void draw_vehicle(GContext *ctx, GPoint position, uint8_t vehicle) {
   if (!vehicle) return;
   int x = position.x, y = position.y;
   GColor color = vehicle == 3 ? GColorWindsorTan :
@@ -427,8 +429,8 @@ static void draw_vehicle(GContext *ctx, GPoint position, uint8_t vehicle) {
   }
 }
 
-static void draw_arrival(GContext *ctx, const ArrivalRow *row, GRect line,
-                         bool selected) {
+static __attribute__((noinline)) void draw_arrival(GContext *ctx, const ArrivalRow *row, GRect line,
+                                                    bool selected) {
   int seconds = (int)difftime(row->arrival, time(NULL));
   char eta[24], text[64];
   if (seconds < 60) snprintf(eta, sizeof(eta), "< 1 мин");
@@ -488,17 +490,23 @@ static void draw_route_group(GContext *ctx, const RouteGroup *group, int width, 
   }
 }
 
+static __attribute__((noinline)) void draw_board_row(GContext *ctx, uint16_t row,
+                                                        int width, bool selected) {
+  GRect line = GRect(8, 4, width - 16, 48);
+  static RouteGroup groups[BOARD_SIZE];
+  if (row >= route_groups(groups)) {
+    draw_text(ctx, s_notice ? s_notice : "Нет данных о прибытии", line, selected);
+    return;
+  }
+  draw_route_group(ctx, &groups[row], width, selected);
+}
+
 static void draw_row(GContext *ctx, const Layer *layer, MenuIndex *index, void *context) {
   GRect bounds = layer_get_bounds(layer);
   bool selected = menu_cell_layer_is_highlighted(layer);
   GRect line = GRect(8, 4, bounds.size.w - 16, 48);
   if (s_on_board) {
-    RouteGroup groups[BOARD_SIZE];
-    if (index->row >= route_groups(groups)) {
-      draw_text(ctx, s_notice ? s_notice : "Нет данных о прибытии", line, selected);
-      return;
-    }
-    draw_route_group(ctx, &groups[index->row], bounds.size.w, selected);
+    draw_board_row(ctx, index->row, bounds.size.w, selected);
     return;
   }
 
