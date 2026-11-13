@@ -101,6 +101,8 @@ static bool send(int command, int index) {
 }
 
 static void search(void) {
+  cancel_timer(&s_row_timer);
+  cancel_timer(&s_focus_timer);
   s_stop_count = 0;
   memset(s_stops, 0, sizeof(s_stops));
   memset(s_previews, 0, sizeof(s_previews));
@@ -240,10 +242,17 @@ static void inbox(DictionaryIterator *iterator, void *context) {
     s_busy = false;
     s_generation = s_request;
     s_stop_count = number(iterator, MESSAGE_KEY_Total);
+    if (s_stop_count < 0 || s_stop_count >= MENU_INDEX_NOT_FOUND) {
+      s_stop_count = 0;
+      s_generation = 0;
+      failed("Данные недоступны");
+      return;
+    }
     update_focus();
     s_notice = s_stop_count ? NULL : "Рядом нет остановок";
     redraw();
-  } else if (status == 2 && !s_on_board && index == s_requested_row) {
+  } else if (status == 2 && !s_on_board && index >= 0 && index < s_stop_count &&
+             index == s_requested_row) {
     StopRow *row = &s_stops[index % CACHE_SIZE];
     row->index = index;
     row->loaded = true;
@@ -273,6 +282,8 @@ static void inbox(DictionaryIterator *iterator, void *context) {
     copy_text(iterator, MESSAGE_KEY_Route, row->route, sizeof(row->route));
     if (++s_next_index < s_next_count) send(5, s_next_index);
     else commit_board();
+  } else {
+    failed("Данные недоступны");
   }
 }
 
@@ -285,7 +296,8 @@ static void outbox_failed(DictionaryIterator *iterator, AppMessageResult reason,
   if (number(iterator, MESSAGE_KEY_Command) == 6) {
     s_focus_sent = -2;
     update_focus();
-  } else {
+  } else if (s_timeout && dict_find(iterator, MESSAGE_KEY_Request) &&
+             (unsigned)number(iterator, MESSAGE_KEY_Request) == s_request) {
     failed("Проверьте связь с телефоном");
   }
 }
@@ -296,7 +308,10 @@ typedef struct {
   int counts[2];
 } RouteGroup;
 
-static int route_groups(RouteGroup groups[BOARD_SIZE]) {
+// Menu callbacks run serially and consume the groups before returning.
+static RouteGroup s_route_groups[BOARD_SIZE];
+
+static int route_groups(void) {
   int count = 0;
   time_t now = time(NULL);
   for (int i = 0; i < s_count; i++) {
@@ -305,16 +320,16 @@ static int route_groups(RouteGroup groups[BOARD_SIZE]) {
 
     int group = 0;
     while (group < count) {
-      const ArrivalRow *first = groups[group].first;
+      const ArrivalRow *first = s_route_groups[group].first;
       if (first->vehicle == row->vehicle && strcmp(first->route, row->route) == 0 &&
           strcmp(first->next, row->next) == 0) break;
       group++;
     }
     if (group == count) {
-      groups[count++] = (RouteGroup){ .first = row };
+      s_route_groups[count++] = (RouteGroup){ .first = row };
     }
 
-    RouteGroup *entry = &groups[group];
+    RouteGroup *entry = &s_route_groups[group];
     int source = row->live ? 0 : 1;
     int slot = entry->counts[source];
     if (slot < 3) {
@@ -327,8 +342,7 @@ static int route_groups(RouteGroup groups[BOARD_SIZE]) {
 
 static uint16_t row_count(MenuLayer *menu, uint16_t section, void *context) {
   if (!s_on_board) return s_stop_count + 1;
-  static RouteGroup groups[BOARD_SIZE];
-  int count = route_groups(groups);
+  int count = route_groups();
   return count ? count : 1;
 }
 
@@ -340,10 +354,9 @@ static int16_t row_height(MenuLayer *menu, MenuIndex *index, void *context) {
     if (preview->index != index->row) return PBL_IF_ROUND_ELSE(138, 128);
     return PBL_IF_ROUND_ELSE(138, 128) + 18 * (!!preview->rows[0].next[0] + !!preview->rows[1].next[0]);
   }
-  static RouteGroup groups[BOARD_SIZE];
-  int count = route_groups(groups);
+  int count = route_groups();
   if (index->row >= count) return 48;
-  RouteGroup *group = &groups[index->row];
+  RouteGroup *group = &s_route_groups[index->row];
   return (group->counts[0] && group->counts[1] ? 68 : 48) +
          (group->first->next[0] ? 18 : 0);
 }
@@ -506,12 +519,11 @@ static void draw_route_group(GContext *ctx, const RouteGroup *group,
 static __attribute__((noinline)) void draw_board_row(GContext *ctx, uint16_t row,
                                                         int width, bool selected) {
   GRect line = GRect(ROW_INSET, 4, width - 2 * ROW_INSET, 48);
-  static RouteGroup groups[BOARD_SIZE];
-  if (row >= route_groups(groups)) {
+  if (row >= route_groups()) {
     draw_text(ctx, s_notice ? s_notice : "Нет данных о прибытии", line, selected);
     return;
   }
-  draw_route_group(ctx, &groups[row], width, selected);
+  draw_route_group(ctx, &s_route_groups[row], width, selected);
 }
 
 static void draw_row(GContext *ctx, const Layer *layer, MenuIndex *index, void *context) {
@@ -644,17 +656,16 @@ static __attribute__((noinline)) void round_stop(GContext *ctx, uint16_t index, 
 }
 
 static __attribute__((noinline)) void round_board(GContext *ctx, uint16_t index, bool selected) {
-  static RouteGroup groups[BOARD_SIZE];
-  if (index >= route_groups(groups)) {
+  if (index >= route_groups()) {
     round_text(ctx, s_notice ? s_notice : "Нет данных о прибытии", s_font,
                GRect(24, 32, 132, 48), selected);
     return;
   }
   if (!selected) {
-    round_text(ctx, groups[index].first->route, s_small_font, GRect(36, 6, 108, 20), false);
+    round_text(ctx, s_route_groups[index].first->route, s_small_font, GRect(36, 6, 108, 20), false);
     return;
   }
-  draw_route_group(ctx, &groups[index], 180, true);
+  draw_route_group(ctx, &s_route_groups[index], 180, true);
   if (s_notice) {
     round_text(ctx, s_notice, s_small_font, GRect(24, 87, 132, 22), true);
   }
@@ -682,7 +693,7 @@ static void select_row(MenuLayer *menu, MenuIndex *index, void *context) {
     cancel_timer(&s_timeout);
     s_requested_row = -1;
     s_selected = index->row;
-    snprintf(s_title, sizeof(s_title), "%s", row->name);
+    memcpy(s_title, row->name, sizeof(s_title));
     s_on_board = true;
     s_count = 0;
     Preview *preview = &s_previews[s_selected % CACHE_SIZE];
