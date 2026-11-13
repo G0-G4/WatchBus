@@ -49,11 +49,22 @@ function distance(lat, lon, stop) {
   return 12742000 * Math.asin(Math.sqrt(Math.min(1, h)));
 }
 
-function nearby(stops, lat, lon) {
+function nearby(stops, lat, lon, nextStopNames) {
   return stops.map(function (stop) { return { stop: stop, distance: distance(lat, lon, stop) }; })
     .filter(function (item) { return item.distance <= 1000; })
     .sort(function (a, b) {
       return a.distance - b.distance || (a.stop[0] < b.stop[0] ? -1 : 1);
+    }).map(function (item) {
+      if (!nextStopNames || !item.stop[6]) return item;
+      var stop = item.stop.slice();
+      stop[6] = stop[6].map(function (mapping) {
+        var directions = Object.create(null);
+        Object.keys(mapping).forEach(function (key) {
+          directions[key] = nextStopNames[mapping[key]];
+        });
+        return directions;
+      });
+      return { stop: stop, distance: item.distance };
     });
 }
 

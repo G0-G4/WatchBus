@@ -1,6 +1,6 @@
 # WatchBus
 
-WatchBus показывает ближайшие остановки наземного транспорта Москвы на Pebble Time 2. Проверенная связка — Pebble Time 2 и Pixel 10 с Android.
+WatchBus показывает ближайшие остановки наземного транспорта Москвы на Pebble. Сборка поддерживает Pebble Time 2, Pebble Time, Pebble Time Round и Pebble 2 Duo. На физических устройствах проверена связка Pebble Time 2 и Pixel 10 с Android.
 
 ## Использование
 
@@ -11,7 +11,7 @@ WatchBus показывает ближайшие остановки наземн
 
 ## Сборка и установка
 
-Нужны [Pebble SDK и CLI](https://developer.rebble.io/sdk/) с поддержкой платформы `emery`, а также Node.js для тестов.
+Нужны [Pebble SDK и CLI](https://developer.rebble.io/sdk/) с поддержкой платформ `emery`, `basalt`, `chalk` и `flint`, а также Node.js для тестов.
 
 ```sh
 node --test tests/*.test.js
@@ -50,4 +50,23 @@ WatchBus использует [SemVer](https://semver.org/). Версия в `pa
 - **MINOR** — новая обратно совместимая возможность.
 - **PATCH** — обратно совместимое исправление.
 
-Перед публикацией запусти тесты и собери `WatchBus.pbw` из коммита релиза. Опубликуй пакет в [GitHub Releases](https://github.com/G0-G4/WatchBus/releases) с тегом этого коммита. Изменения уже опубликованной сборки выпускай под новой версией.
+### Сжатый пакет
+
+После `pebble build` можно создать отдельный пакет со сжатием ZIP. Команда требует Python 3 и исключает карту исходников из сжатого пакета. Для отладки она доступна в `build/pebble-js-app.js.map`.
+
+```sh
+python3 - <<'PYTHON'
+from zipfile import ZIP_DEFLATED, ZipFile
+
+with ZipFile("build/WatchBus.pbw") as source:
+    with ZipFile("build/WatchBus-compressed.pbw", "w",
+                 compression=ZIP_DEFLATED, compresslevel=9) as target:
+        for name in source.namelist():
+            if name != "pebble-js-app.js.map":
+                target.writestr(name, source.read(name))
+PYTHON
+```
+
+Сжатый пакет находится в `build/WatchBus-compressed.pbw`.
+
+Перед публикацией запусти тесты и собери `WatchBus.pbw` из коммита релиза. Опубликуй сжатый пакет в [GitHub Releases](https://github.com/G0-G4/WatchBus/releases) с тегом этого коммита. Изменения уже опубликованной сборки выпускай под новой версией.

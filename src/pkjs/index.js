@@ -54,7 +54,8 @@ function findStops(request) {
   prefetch.close();
   navigator.geolocation.getCurrentPosition(function (position) {
     if (request !== searchRequest) return;
-    nearby = transport.nearby(catalog.stops, position.coords.latitude, position.coords.longitude);
+    nearby = transport.nearby(catalog.stops, position.coords.latitude, position.coords.longitude,
+      catalog.nextStopNames);
     nearby.forEach(function (item, index) { indices.set(item.stop[0], index); });
     reply(request, 1, { Total: nearby.length });
     prefetch.reset(nearby.map(function (item) { return item.stop; }));

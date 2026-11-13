@@ -138,6 +138,17 @@ def resolve(row, cache):
     return matches[0] if len(matches) == 1 else {}
 
 
+def encode_next_stop_names(payload):
+    names = {}
+    for stop in payload['stops']:
+        if len(stop) > 6:
+            stop[6] = [{key: names.setdefault(name, len(names))
+                        for key, name in sorted(mapping.items())}
+                       for mapping in stop[6]]
+    payload['nextStopNames'] = list(names)
+    return payload
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cache', required=True, type=Path)
@@ -194,6 +205,7 @@ def main():
         entry.append([{key: next(iter(names)) for key, names in source.items()
                        if len(names) == 1} for source in (by_path, by_route)])
     payload = {'routes': len(rows), 'unresolved': missing, 'stops': sorted(catalog.values())}
+    encode_next_stop_names(payload)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix('.tmp')
     temporary.write_text(json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + '\n')

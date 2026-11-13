@@ -50,3 +50,17 @@ test('mixed board replaces only a reliably identified scheduled trip', () => {
   assert.deepEqual(mergeArrivals([forecast], [scheduled, uncertain]), [forecast, uncertain]);
   assert.deepEqual(mergeArrivals([], [scheduled]), [scheduled]);
 });
+
+test('nearby resolves dictionary indices without mutating the catalog', () => {
+  const stop = ['stop', 'Площадка', 55.7, 37.4, [], null, [{ path: 0 }, { '688': 1 }]];
+  const names = ['Следующая по рейсу', 'Следующая по маршруту'];
+  const [item] = nearby([stop], 55.7, 37.4, names);
+  assert.equal(item.stop[6][1]['688'], names[1]);
+  assert.equal(stop[6][0].path, 0);
+  const routePath = [{ number: '688', type: 'bus', externalForecast: [
+    { time: 50, byTelemetry: 1, routePathId: 'path' },
+    { time: 60, byTelemetry: 1 }
+  ] }];
+  const arrivals = live({ id: 'stop', routePath }, 'stop', 1000, item.stop);
+  assert.deepEqual(arrivals.map(row => row.next), names);
+});
