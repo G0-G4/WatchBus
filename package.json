@@ -1,7 +1,7 @@
 {
   "name": "watchbus",
   "author": "WatchBus",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "keywords": [
     "pebble-app"
@@ -58,7 +58,8 @@
       "Vehicle",
       "SecondVehicle",
       "NextStop",
-      "SecondNextStop"
+      "SecondNextStop",
+      "Routes"
     ],
     "resources": {
       "media": [

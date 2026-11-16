@@ -1,6 +1,8 @@
 #include <pebble.h>
 
-#define BOARD_SIZE 20
+#define BOARD_SIZE 36
+#define ROSTER_SIZE 192
+#define MAX_ROUTES 32
 #define CACHE_SIZE 32
 #define HEADER_COLOR GColorOxfordBlue
 #define SELECTED_COLOR GColorDukeBlue
@@ -47,9 +49,13 @@ static time_t s_expiry, s_next_expiry;
 static bool s_ready, s_on_board, s_busy, s_partial;
 static const char *s_notice = "Подключение к телефону...";
 static char s_title[200];
+static char s_roster[ROSTER_SIZE];
+static unsigned s_roster_count;
+static bool s_board_failed;
 
 static void refresh_board(bool automatic);
 static void request_row(void *context);
+static void update_board_menu(bool replace);
 
 static void redraw(void) {
   menu_layer_reload_data(s_menu);
@@ -65,6 +71,7 @@ static void cancel_timer(AppTimer **timer) {
 static void failed(const char *notice) {
   cancel_timer(&s_timeout);
   s_busy = false;
+  if (s_on_board) s_board_failed = true;
   s_waiting_final = false;
   s_requested_row = -1;
   s_request++;
@@ -184,9 +191,7 @@ static void update_focus(void) {
 }
 
 static void commit_board(void) {
-  memcpy(s_board, s_next_board, s_next_count * sizeof(s_board[0]));
-  s_count = s_next_count;
-  s_expiry = s_next_expiry;
+  s_board_failed = s_partial;
   s_busy = s_intermediate;
   s_waiting_final = s_intermediate;
   if (s_intermediate) {
@@ -197,7 +202,7 @@ static void commit_board(void) {
     else s_timeout = app_timer_register(90000, timed_out, NULL);
   }
   s_notice = s_partial ? "Расписание загружено частично" : NULL;
-  redraw();
+  update_board_menu(true);
 }
 
 static void inbox(DictionaryIterator *iterator, void *context) {
@@ -230,6 +235,21 @@ static void inbox(DictionaryIterator *iterator, void *context) {
     copy_text(iterator, MESSAGE_KEY_SecondNextStop, preview->rows[1].next, sizeof(preview->rows[1].next));
     copy_text(iterator, MESSAGE_KEY_SecondRoute, preview->rows[1].route, sizeof(preview->rows[1].route));
     if (!s_on_board) redraw();
+    return;
+  }
+  if (status == 9) {
+    if (!s_on_board || !s_busy || s_roster_count ||
+        (unsigned)number(iterator, MESSAGE_KEY_Generation) != s_board_request) return;
+    copy_text(iterator, MESSAGE_KEY_Routes, s_roster, sizeof(s_roster));
+    s_roster_count = *s_roster ? 1 : 0;
+    for (char *cursor = s_roster; *cursor; cursor++) {
+      if (*cursor == '\n') {
+        *cursor = '\0';
+        if (s_roster_count == MAX_ROUTES) break;
+        s_roster_count++;
+      }
+    }
+    update_board_menu(false);
     return;
   }
   if (status == 8) {
@@ -321,12 +341,20 @@ static void outbox_failed(DictionaryIterator *iterator, AppMessageResult reason,
 
 typedef struct {
   const ArrivalRow *first;
+  const char *route;
   int times[2][3];
   int counts[2];
 } RouteGroup;
 
-// Menu callbacks run serially and consume the groups before returning.
-static RouteGroup s_route_groups[BOARD_SIZE];
+static RouteGroup s_route_groups[BOARD_SIZE + MAX_ROUTES];
+static int s_group_count;
+
+static int compare_routes(const RouteGroup *group, const char *route, const ArrivalRow *arrival) {
+  int order = strcmp(group->route, route);
+  if (order || !group->first || !arrival) return order;
+  order = strcmp(group->first->next, arrival->next);
+  return order ? order : (int)group->first->vehicle - (int)arrival->vehicle;
+}
 
 static int route_groups(void) {
   int count = 0;
@@ -336,14 +364,12 @@ static int route_groups(void) {
     if (row->arrival <= now || (row->live && s_expiry <= now)) continue;
 
     int group = 0;
-    while (group < count) {
-      const ArrivalRow *first = s_route_groups[group].first;
-      if (first->vehicle == row->vehicle && strcmp(first->route, row->route) == 0 &&
-          strcmp(first->next, row->next) == 0) break;
-      group++;
-    }
-    if (group == count) {
-      s_route_groups[count++] = (RouteGroup){ .first = row };
+    while (group < count && compare_routes(&s_route_groups[group], row->route, row) < 0) group++;
+    if (group == count || compare_routes(&s_route_groups[group], row->route, row) != 0) {
+      memmove(&s_route_groups[group + 1], &s_route_groups[group],
+              (count - group) * sizeof(s_route_groups[0]));
+      s_route_groups[group] = (RouteGroup){ .first = row, .route = row->route };
+      count++;
     }
 
     RouteGroup *entry = &s_route_groups[group];
@@ -354,13 +380,58 @@ static int route_groups(void) {
       entry->counts[source]++;
     }
   }
+  const char *route = s_roster;
+  for (unsigned i = 0; i < s_roster_count; i++, route += strlen(route) + 1) {
+    int group = 0;
+    while (group < count && strcmp(s_route_groups[group].route, route) < 0) group++;
+    if (group < count && strcmp(s_route_groups[group].route, route) == 0) continue;
+    memmove(&s_route_groups[group + 1], &s_route_groups[group],
+            (count - group) * sizeof(s_route_groups[0]));
+    s_route_groups[group] = (RouteGroup){ .route = route };
+    count++;
+  }
   return count;
+}
+
+static void update_board_menu(bool replace) {
+  static ArrivalRow selected;
+  MenuIndex index = menu_layer_get_selected_index(s_menu);
+  bool had_selection = index.row < s_group_count;
+  bool had_arrivals = had_selection && s_route_groups[index.row].first;
+  if (had_arrivals) selected = *s_route_groups[index.row].first;
+  else if (had_selection) {
+    strncpy(selected.route, s_route_groups[index.row].route, sizeof(selected.route) - 1);
+    selected.route[sizeof(selected.route) - 1] = '\0';
+  }
+
+  if (replace) {
+    memcpy(s_board, s_next_board, s_next_count * sizeof(s_board[0]));
+    s_count = s_next_count;
+    s_expiry = s_next_expiry;
+  }
+  s_group_count = route_groups();
+
+  int row = 0;
+  if (had_selection && s_group_count) {
+    while (row + 1 < s_group_count &&
+           compare_routes(&s_route_groups[row], selected.route, NULL) < 0) row++;
+    for (int i = row; had_arrivals && i < s_group_count; i++) {
+      if (strcmp(s_route_groups[i].route, selected.route) != 0) break;
+      if (!compare_routes(&s_route_groups[i], selected.route, &selected)) {
+        row = i;
+        break;
+      }
+    }
+  }
+  redraw();
+  if (row != index.row || menu_layer_get_selected_index(s_menu).row != row) {
+    menu_layer_set_selected_index(s_menu, MenuIndex(0, row), MenuRowAlignCenter, false);
+  }
 }
 
 static uint16_t row_count(MenuLayer *menu, uint16_t section, void *context) {
   if (!s_on_board) return s_stop_count + 1;
-  int count = route_groups();
-  return count ? count : 1;
+  return s_group_count ? s_group_count : 1;
 }
 
 #ifndef PBL_ROUND
@@ -371,9 +442,9 @@ static int16_t row_height(MenuLayer *menu, MenuIndex *index, void *context) {
     if (preview->index != index->row) return PBL_IF_ROUND_ELSE(138, 128);
     return PBL_IF_ROUND_ELSE(138, 128) + 18 * (!!preview->rows[0].next[0] + !!preview->rows[1].next[0]);
   }
-  int count = route_groups();
-  if (index->row >= count) return 48;
+  if (index->row >= s_group_count) return 48;
   RouteGroup *group = &s_route_groups[index->row];
+  if (!group->first) return 58;
   return (group->counts[0] && group->counts[1] ? 68 : 48) +
          (group->first->next[0] ? 18 : 0);
 }
@@ -496,6 +567,16 @@ static void draw_route_group(GContext *ctx, const RouteGroup *group,
                              int width, bool selected) {
   const ArrivalRow *first = group->first;
   GRect title = GRect(ROW_INSET, 2, width - 2 * ROW_INSET, 22);
+  if (!first) {
+    draw_text(ctx, group->route, title, selected);
+    graphics_context_set_text_color(ctx, selected ? GColorWhite : GColorBlack);
+    const char *notice = s_busy ? "Загрузка..." :
+      s_board_failed ? "Не удалось загрузить" : "Нет ближайших рейсов";
+    graphics_draw_text(ctx, notice, s_small_font,
+                       GRect(ROW_INSET, 24, width - 2 * ROW_INSET, 32),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    return;
+  }
   draw_vehicle(ctx, GPoint(title.origin.x, 3), first->vehicle);
   int icon_width = first->vehicle ? 29 : 0;
   title.origin.x += icon_width;
@@ -536,7 +617,7 @@ static void draw_route_group(GContext *ctx, const RouteGroup *group,
 static __attribute__((noinline)) void draw_board_row(GContext *ctx, uint16_t row,
                                                         int width, bool selected) {
   GRect line = GRect(ROW_INSET, 4, width - 2 * ROW_INSET, 48);
-  if (row >= route_groups()) {
+  if (row >= s_group_count) {
     draw_text(ctx, s_notice ? s_notice : "Нет данных о прибытии", line, selected);
     return;
   }
@@ -667,13 +748,13 @@ static __attribute__((noinline)) void round_stop(GContext *ctx, uint16_t index, 
 }
 
 static __attribute__((noinline)) void round_board(GContext *ctx, uint16_t index, bool selected) {
-  if (index >= route_groups()) {
+  if (index >= s_group_count) {
     round_text(ctx, s_notice ? s_notice : "Нет данных о прибытии", s_font,
                GRect(24, 32, 132, 48), selected);
     return;
   }
   if (!selected) {
-    round_text(ctx, s_route_groups[index].first->route, s_small_font, GRect(36, 6, 108, 20), false);
+    round_text(ctx, s_route_groups[index].route, s_small_font, GRect(36, 6, 108, 20), false);
     return;
   }
   draw_route_group(ctx, &s_route_groups[index], 180, true);
@@ -707,6 +788,8 @@ static void select_row(MenuLayer *menu, MenuIndex *index, void *context) {
     memcpy(s_title, row->name, sizeof(s_title));
     s_on_board = true;
     s_count = 0;
+    s_roster_count = 0;
+    s_board_failed = false;
     Preview *preview = &s_previews[s_selected % CACHE_SIZE];
     if (preview->index == s_selected) {
       time_t now = time(NULL);
@@ -720,6 +803,7 @@ static void select_row(MenuLayer *menu, MenuIndex *index, void *context) {
     }
     s_busy = true;
     s_notice = s_count ? NULL : "Загрузка табло...";
+    s_group_count = route_groups();
     send(8, s_selected);
     redraw();
     menu_layer_set_selected_index(s_menu, MenuIndex(0, 0), PBL_IF_ROUND_ELSE(MenuRowAlignCenter, MenuRowAlignTop), false);
@@ -780,7 +864,7 @@ static void clicks(void *context) {
 
 static void tick(struct tm *local_time, TimeUnits units) {
   if (local_time->tm_sec % 5 == 0) {
-    if (s_on_board) redraw();
+    if (s_on_board) update_board_menu(false);
     else layer_mark_dirty(menu_layer_get_layer(s_menu));
   }
 }

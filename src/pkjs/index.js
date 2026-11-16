@@ -67,17 +67,23 @@ function findStops(request) {
 function offer(request, value, status) {
   // Reserve space for the first arrival of each route and source before adding more.
   var seen = new Set();
+  var seenRoutes = new Set();
+  var firstPerRoute = [];
   var first = [];
   var additional = [];
   value.rows.forEach(function (row, index) {
     var key = JSON.stringify([row.kind || 0, row.route, row.live, row.next || '']);
-    if (seen.has(key)) additional.push(index);
+    if (!seenRoutes.has(row.route)) {
+      seenRoutes.add(row.route);
+      seen.add(key);
+      firstPerRoute.push(index);
+    } else if (seen.has(key)) additional.push(index);
     else {
       seen.add(key);
       first.push(index);
     }
   });
-  var rows = first.concat(additional).slice(0, 20).sort(function (a, b) {
+  var rows = firstPerRoute.concat(first, additional).slice(0, 36).sort(function (a, b) {
     return a - b;
   }).map(function (index) { return value.rows[index]; });
   board.transfer = { rows: rows };
@@ -96,7 +102,11 @@ function fetchBoard(request, index, command) {
       offer(request, value, 7);
     }
   }
-  if (command === 8) intermediate(prefetch.snapshot(stop));
+  if (command === 8) {
+    var routes = Array.from(new Set(stop[4].map(function (route) { return route[1]; })));
+    send({ Status: 9, Generation: request, Routes: routes.join('\n') });
+    intermediate(prefetch.snapshot(stop));
+  }
   prefetch.board(stop, command === 4 ? 'auto' : 'manual', command === 8, intermediate)
     .then(function (result) {
       if (board !== current) return;
