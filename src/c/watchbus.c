@@ -42,12 +42,14 @@ static int s_focus_sent = -2;
 static AppTimer *s_focus_timer;
 static int s_stop_count, s_selected, s_count, s_next_count, s_next_index;
 static int s_requested_row = -1;
+static unsigned s_row_retries;
 static time_t s_expiry, s_next_expiry;
 static bool s_ready, s_on_board, s_busy, s_partial;
 static const char *s_notice = "Подключение к телефону...";
 static char s_title[200];
 
 static void refresh_board(bool automatic);
+static void request_row(void *context);
 
 static void redraw(void) {
   menu_layer_reload_data(s_menu);
@@ -77,8 +79,15 @@ static void timed_out(void *context) {
 
 static bool send(int command, int index) {
   DictionaryIterator *outbox;
+  AppMessageResult result = app_message_outbox_begin(&outbox);
+  if (command == 2 && result == APP_MSG_BUSY && s_row_retries < 20) {
+    s_row_retries++;
+    s_row_timer = app_timer_register(100, request_row, NULL);
+    if (!s_row_timer) failed("Проверьте связь с телефоном");
+    return false;
+  }
   unsigned request = command == 6 ? s_request : ++s_request;
-  if (app_message_outbox_begin(&outbox) != APP_MSG_OK ||
+  if (result != APP_MSG_OK ||
       dict_write_int32(outbox, MESSAGE_KEY_Command, command) != DICT_OK ||
       dict_write_int32(outbox, MESSAGE_KEY_Request, request) != DICT_OK ||
       dict_write_int32(outbox, MESSAGE_KEY_Index, index) != DICT_OK ||
@@ -157,7 +166,7 @@ static void copy_text(DictionaryIterator *iterator, uint32_t key, char *out, siz
 static void notify_focus(void *context) {
   s_focus_timer = NULL;
   if (s_on_board) return;
-  if (s_timeout) {
+  if (s_timeout || s_requested_row >= 0) {
     s_focus_timer = app_timer_register(150, notify_focus, NULL);
     return;
   }
@@ -290,6 +299,14 @@ static void inbox(DictionaryIterator *iterator, void *context) {
 static void request_row(void *context) {
   s_row_timer = NULL;
   if (!s_on_board && s_requested_row >= 0) send(2, s_requested_row);
+}
+
+static void queue_row(int index) {
+  if (s_requested_row >= 0 || s_busy || s_notice) return;
+  s_row_timer = app_timer_register(1, request_row, NULL);
+  if (!s_row_timer) return;
+  s_requested_row = index;
+  s_row_retries = 0;
 }
 
 static void outbox_failed(DictionaryIterator *iterator, AppMessageResult reason, void *context) {
@@ -541,11 +558,8 @@ static void draw_row(GContext *ctx, const Layer *layer, MenuIndex *index, void *
   }
   StopRow *row = &s_stops[index->row % CACHE_SIZE];
   if (!row->loaded || row->index != index->row) {
-    if (s_requested_row < 0 && !s_busy && !s_notice) {
-      s_requested_row = index->row;
-      s_row_timer = app_timer_register(1, request_row, NULL);
-    }
-    draw_text(ctx, "Загрузка...", line, selected);
+    queue_row(index->row);
+    draw_text(ctx, s_notice ? s_notice : "Загрузка...", line, selected);
     return;
   }
   line.origin.y = PBL_IF_ROUND_ELSE(15, 4);
@@ -621,11 +635,8 @@ static __attribute__((noinline)) void round_stop(GContext *ctx, uint16_t index, 
   }
   StopRow *stop = &s_stops[index % CACHE_SIZE];
   if (!stop->loaded || stop->index != index) {
-    if (selected && s_requested_row < 0 && !s_busy && !s_notice) {
-      s_requested_row = index;
-      s_row_timer = app_timer_register(1, request_row, NULL);
-    }
-    round_text(ctx, "Загрузка...", s_font,
+    queue_row(index);
+    round_text(ctx, s_notice ? s_notice : "Загрузка...", s_font,
                selected ? GRect(24, 44, 132, 24) : GRect(36, 3, 108, 24), selected);
     return;
   }

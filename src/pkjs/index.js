@@ -133,7 +133,7 @@ Pebble.addEventListener('appmessage', function (event) {
           Detail: Math.round(item.distance) + ' м' + (item.stop[5] ? '\n' + item.stop[5] : '') });
         prefetch.enqueue([item.stop]);
         preview(item.stop);
-      }
+      } else reply(request, -2);
       break;
     case 3:
     case 4:
